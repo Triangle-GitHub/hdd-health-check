@@ -1,0 +1,10 @@
+# 原始证据日志：只留在本地，不推到 GitHub
+# （里面含设备序列号等本地信息，且体积大）
+logs/
+*.log
+
+# 临时文件
+*.tmp
+*.bak
+Thumbs.db
+desktop.ini
