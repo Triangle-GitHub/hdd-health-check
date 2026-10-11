@@ -131,3 +131,113 @@ Start-Process -FilePath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.e
 快速格式化 / 重建分区后，文件系统显示全空，但**旧数据的簇原封不动躺在盘片上**，用 R-Studio / DMDE / TestDisk / PhotoRec 能扫出来。
 
 判据是「是否被快速格式化过」，不是「盘里有没有文件」。
+
+---
+
+## PowerShell 5.1 / .NET Framework 的坑
+
+这一节全是实测踩出来的，而且**都表现为「静默失败」或「半个错误」** —— 最难查的那一类。
+
+### `[byte[]]::new()` 在 5.1 里不存在
+
+```powershell
+$buf = [byte[]]::new(16MB)        # PS 7 可以；PS 5.1 -> Cannot find an overload for new
+$buf = New-Object byte[] (16MB)   # 两边都可以
+```
+
+`::new()` 是 PS 5.0 引入的，但**数组类型**的 `::new` 在 5.1 里解析不到重载。用 `New-Object`。
+
+### `[IO.File]::Open()` 的 5/6 参重载在 .NET Framework 里根本不存在
+
+这是最花时间的一个坑。实测列出 PS 5.1 能看到的全部重载：
+
+```powershell
+[IO.File].GetMethods() | Where-Object { $_.Name -eq 'Open' } |
+    ForEach-Object { "Open(" + (($_.GetParameters() | ForEach-Object { $_.ParameterType.Name }) -join ', ') + ")" }
+```
+
+```
+Open(String, FileMode)
+Open(String, FileMode, FileAccess)
+Open(String, FileMode, FileAccess, FileShare)      <- 只有三个
+```
+
+带 `bufferSize` / `FileOptions` 的重载是 **.NET Core 才加的**，.NET Framework 从来没有。所以：
+
+```powershell
+# 下面两个在 PS 5.1 下都会报 "Cannot find an overload for Open and the argument count: 5"
+[IO.File]::Open($p, 'Create', 'Write', 'None', $chunk)
+[IO.File]::Open($p, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None, $chunk)
+
+# 这样才行（FileStream 的构造函数有 5/6 参版本）
+New-Object System.IO.FileStream -ArgumentList $p,
+    ([IO.FileMode]::Create), ([IO.FileAccess]::Write), ([IO.FileShare]::None), $chunk
+```
+
+**注意第二行** —— 用**枚举对象**也一样找不到重载。所以这不是「字符串转枚举」的问题，是**那个重载根本不存在**。
+
+**教训：给 5.1 用的脚本必须在 5.1 下实测。** 你在 PS 7 下写的代码「看着都对」，一放到 5.1 就运行时炸，而且语法检查抓不到。
+
+（`[IO.File]::OpenRead($path)` 是 1 参，两边都行；`[IO.File]::WriteAllBytes($path, $bytes)` 也行。）
+
+### 用 `[scriptblock]::Create()` 做 5.1 兼容性检查
+
+```powershell
+& 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -NoProfile -Command `
+  '$null = [scriptblock]::Create((Get-Content -Raw ".\script.ps1")); "OK"'
+```
+
+它**只解析不执行**，能抓到「5.1 不认的语法」，但**抓不到上面那种「语法没问题、运行时找不到重载」的坑**。
+
+### `Start-Job` 的失败是静默的 —— 一定要加 `catch`
+
+`Start-Job` 里的 scriptblock 抛异常，默认**什么都不告诉父进程**：没有日志、没有输出，文件可能被创建成 0 字节。
+
+我们有一次三个 job 一起静默失败，排查方向完全跑偏（一度以为是「桥接器在停转」）。加上 `catch` 之后：
+
+```powershell
+try { ... }
+catch { Say ("[{0}] loader ERROR: {1}" -f (Get-Date -Format 'HH:mm:ss'), $_.Exception.Message) }
+finally { ... }
+```
+
+**错误一秒内就现形了。** 同样的代码，之前白花了好几个小时。
+
+### 给 PS 5.1 跑的脚本必须带 UTF-8 BOM（或者干脆只用 ASCII）
+
+PS 5.1 读**无 BOM** 的 `.ps1` 时按系统 ANSI 代码页（中文系统 = GBK）解析。所以脚本里有中文 → **输出全是乱码**，甚至可能因为解码出的字节破坏语法。
+
+```powershell
+# 从 PS 7 修：读出（正确按 UTF-8）再带 BOM 写回
+$c = Get-Content $path -Raw
+Set-Content -Path $path -Value $c -Encoding utf8BOM -NoNewline
+([System.IO.File]::ReadAllBytes($path))[0..2]      # 应该是 239,187,191
+```
+
+**本仓库的脚本一律只用 ASCII** —— 这样与代码页无关，任何环境下都不会乱码。
+
+### `Start-Process -WindowStyle Hidden` 之后你看不到任何报错
+
+后台脚本出错 → 窗口是隐藏的 → 输出丢了。**所以后台脚本必须自己写日志**，而且要把「启动阶段」的关键状态也写进去：目标设备解析结果、参数、job 状态。没有这些，失败就是完全的黑盒。
+
+### 「验证真的在 I/O」要用独立指标，别信自己脚本里的计数
+
+用两个独立来源交叉验证：
+
+```powershell
+# ① 盘的累计写入扇区（能算出真吞吐）
+& $sc -l devstat -d sat /dev/sdX | Select-String 'Logical Sectors Written'
+
+# ② 卷剩余空间的前后差
+(Get-PSDrive G).Free      # 各读一次，除以间隔 = MB/s
+```
+
+> ⚠️ **`Get-Item <被独占打开的文件> | Measure Length` 会骗你。** NTFS 对被另一个进程以 `FileShare.None` 打开的文件，目录项大小的更新是滞后的，可能一直显示 `0`。我们因此白等了两轮。
+
+### 用 `Get-Counter` 量每个物理盘的实时吞吐
+
+```powershell
+Get-Counter '\PhysicalDisk(*)\Disk Read Bytes/sec','\PhysicalDisk(*)\Disk Write Bytes/sec' -SampleInterval 1 -MaxSamples 3
+```
+
+（注意：中文系统上这个计数器名的可用性要实测，抓不到就退回上面的「累计扇区」法。）
