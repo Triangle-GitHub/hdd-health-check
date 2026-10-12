@@ -98,6 +98,7 @@
 | `tools/Keep-Awake.ps1` | 持有系统电源请求，防空闲睡眠 |
 | `tools/Monitor-Temps.ps1` | 定时记录多块盘温度 → CSV + 可读日志 + 结束统计 |
 | `tools/Temperature-Watchdog.ps1` | 温度看门狗：到「该盘规格上限 − Margin」自动杀负载 |
+| `tools/Move-Tree.ps1` | 跨盘批量搬移：dry run 默认、合并冲突预检、robocopy 最佳实践（见 [docs/07](docs/07-bulk-move.md)）|
 
 **所有脚本只用 ASCII** —— Windows PowerShell 5.1 读无 BOM 的 `.ps1` 时按系统 ANSI 代码页解析，非 ASCII 会变乱码甚至破坏语法。保持 ASCII 就与代码页无关。
 
@@ -113,6 +114,7 @@
 | [docs/04-gotchas.md](docs/04-gotchas.md) | smartctl / PowerShell 5.1 / CrystalDiskInfo 的坑 |
 | [docs/05-sanitization.md](docs/05-sanitization.md) | 覆写到底能不能恢复：Clear vs Purge |
 | [docs/06-thermal.md](docs/06-thermal.md) | 温度与盒子散热：实测案例、铝壳分析、免费改造、冷媒的冷凝水风险 |
+| [docs/07-bulk-move.md](docs/07-bulk-move.md) | 跨盘批量搬移：/MOVE 语义、合并冲突、/MT 反例、只排根目录图标、ETA 陷阱 |
 
 ---
 
